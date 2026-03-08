@@ -1,70 +1,82 @@
 import asyncio
 import aiohttp
 import aiosqlite
-import os
 
 DB_NAME = "starwars.db"
-API_URL = "https://www.swapi.tech/api/people/{}"
+BASE_URL = "https://www.swapi.tech/api"
 
 
-CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS characters (
-    id INTEGER PRIMARY KEY,
-    birth_year TEXT,
-    eye_color TEXT,
-    gender TEXT,
-    hair_color TEXT,
-    homeworld TEXT,
-    mass TEXT,
-    name TEXT,
-    skin_color TEXT
-);
-"""
+async def fetch_json(session, url):
+    try:
+        async with session.get(url) as response:
+            if response.status == 200:
+                return await response.json()
+    except Exception:
+        return None
+    return None
 
 
-async def fetch_character(session, char_id):
-    async with session.get(API_URL.format(char_id)) as response:
-        if response.status != 200:
-            return None
+async def fetch_homeworld(session, url):
+    if not url:
+        return None
 
-        data = await response.json()
-        props = data["result"]["properties"]
+    data = await fetch_json(session, url)
+    if data:
+        return data["result"]["properties"]["name"]
 
-        return (
-            int(data["result"]["uid"]),
-            props["birth_year"],
-            props["eye_color"],
-            props["gender"],
-            props["hair_color"],
-            props["homeworld"],
-            props["mass"],
-            props["name"],
-            props["skin_color"],
-        )
+    return None
+
+
+async def fetch_character(session, url):
+    data = await fetch_json(session, url)
+    if not data:
+        return None
+
+    props = data["result"]["properties"]
+
+    homeworld = await fetch_homeworld(session, props["homeworld"])
+
+    return (
+        int(data["result"]["uid"]),
+        props["birth_year"],
+        props["eye_color"],
+        props["gender"],
+        props["hair_color"],
+        homeworld,
+        props["mass"],
+        props["name"],
+        props["skin_color"],
+    )
 
 
 async def main():
-    print("Файл БД:", os.path.abspath(DB_NAME))
 
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(CREATE_TABLE_SQL)
-        await db.commit()
+    async with aiohttp.ClientSession() as session:
 
-        async with aiohttp.ClientSession() as session:
-            tasks = [fetch_character(session, i) for i in range(1, 84)]
-            results = await asyncio.gather(*tasks)
+        # получаем список персонажей
+        data = await fetch_json(session, f"{BASE_URL}/people?page=1&limit=100")
+        characters = data["results"]
 
-            for character in results:
-                if character:
-                    await db.execute("""
-                        INSERT OR REPLACE INTO characters
-                        (id, birth_year, eye_color, gender, hair_color, homeworld, mass, name, skin_color)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, character)
+        tasks = [fetch_character(session, char["url"]) for char in characters]
+
+        results = await asyncio.gather(*tasks)
+
+        results = [r for r in results if r]
+
+        async with aiosqlite.connect(DB_NAME) as db:
+
+            await db.executemany(
+                """
+                INSERT OR REPLACE INTO characters
+                (id, birth_year, eye_color, gender, hair_color, homeworld, mass, name, skin_color)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                results,
+            )
 
             await db.commit()
 
-    print("Все персонажи успешно загружены")
+    print(f"Загружено персонажей: {len(results)}")
 
 
 if __name__ == "__main__":
